@@ -7,10 +7,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -27,6 +27,7 @@ public class SlidingWindowRateLimiterTest {
                             .withTag("7.4.0-v1"));
 
     private static JedisPool jedisPool;
+    private AtomicLong currentTimeMillis;
     private static SlidingWindowRateLimiter rateLimiter;
 
     @BeforeAll
@@ -34,6 +35,14 @@ public class SlidingWindowRateLimiterTest {
         String address = redisContainer.getHost();
         Integer port = redisContainer.getFirstMappedPort();
         jedisPool = new JedisPool(address, port);
+    }
+
+    @BeforeEach
+    public void clearRedis() {
+        try (var jedis = jedisPool.getResource()) {
+            jedis.flushAll();
+        }
+        currentTimeMillis = new AtomicLong(0);
     }
 
     @AfterAll
@@ -95,26 +104,31 @@ public class SlidingWindowRateLimiterTest {
     }
 
     @Test
-    void testSlidingWindowBehavior() throws InterruptedException {
-        rateLimiter = new SlidingWindowRateLimiter(jedisPool, "test:sliding", 3, Duration.ofSeconds(5));
+    void testSlidingWindowBehavior() {
+        SlidingWindowRateLimiter rateLimiter = new SlidingWindowRateLimiter(
+                jedisPool, "test:sliding", 3, Duration.ofSeconds(5), currentTimeMillis::get);
 
+        // First window
         assertTrue(rateLimiter.allowRequest(), "Request 1 should be allowed");
+        currentTimeMillis.addAndGet(1000);
         assertTrue(rateLimiter.allowRequest(), "Request 2 should be allowed");
+        currentTimeMillis.addAndGet(1000);
         assertTrue(rateLimiter.allowRequest(), "Request 3 should be allowed");
+        currentTimeMillis.addAndGet(1000);
         assertFalse(rateLimiter.allowRequest(), "Request 4 should be denied");
 
-        Thread.sleep(2000); // Wait for 2 seconds
+        // Move time forward by 2 more seconds (5 seconds total from start)
+        currentTimeMillis.addAndGet(2000);
 
-        assertTrue(rateLimiter.allowRequest(), "Request 5 should be allowed after 2 seconds");
-        assertTrue(rateLimiter.allowRequest(), "Request 6 should be allowed");
-        assertFalse(rateLimiter.allowRequest(), "Request 7 should be denied");
+        // After 5 seconds, the first request should have expired
+        assertTrue(rateLimiter.allowRequest(), "Request 5 should be allowed after 5 seconds");
+        assertFalse(rateLimiter.allowRequest(), "Request 6 should be denied");
 
-        Thread.sleep(3000); // Wait for another 3 seconds (5 seconds total from start)
+        // Move time forward by 1 more second
+        currentTimeMillis.addAndGet(1000);
 
-        assertTrue(rateLimiter.allowRequest(), "Request 8 should be allowed after 5 seconds");
-        assertTrue(rateLimiter.allowRequest(), "Request 9 should be allowed");
-        assertTrue(rateLimiter.allowRequest(), "Request 10 should be allowed");
-        assertFalse(rateLimiter.allowRequest(), "Request 11 should be denied");
+        // After 6 seconds, the second request should have expired
+        assertTrue(rateLimiter.allowRequest(), "Request 7 should be allowed after 6 seconds");
+        assertFalse(rateLimiter.allowRequest(), "Request 8 should be denied");
     }
-
 }
